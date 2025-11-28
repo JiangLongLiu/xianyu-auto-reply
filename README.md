@@ -190,8 +190,23 @@ xianyu-auto-reply/
     ├── logs/                     # 按日期分割的日志文件
     └── backups/                  # 其他备份文件
 ```
-
+```
 </details>
+
+## 📚 项目文档
+
+项目包含丰富的中文文档，涵盖系统架构、核心功能、部署运维等各个方面：
+
+- [系统概述](.qoder/repowiki/zh/content/系统概述.md)
+- [快速开始](.qoder/repowiki/zh/content/快速开始.md)
+- [系统架构设计](.qoder/repowiki/zh/content/系统架构设计)
+- [核心功能详解](.qoder/repowiki/zh/content/核心功能详解)
+- [数据库设计](.qoder/repowiki/zh/content/数据库设计)
+- [API参考文档](.qoder/repowiki/zh/content/API参考文档)
+- [前端架构](.qoder/repowiki/zh/content/前端架构)
+- [部署与运维](.qoder/repowiki/zh/content/部署与运维)
+- [安全指南](.qoder/repowiki/zh/content/安全指南)
+- [开发者指南](.qoder/repowiki/zh/content/开发者指南)
 
 ## 🆕 最新更新
 
