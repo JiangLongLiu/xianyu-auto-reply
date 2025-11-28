@@ -197,16 +197,16 @@ xianyu-auto-reply/
 
 项目包含丰富的中文文档，涵盖系统架构、核心功能、部署运维等各个方面：
 
-- [系统概述](.qoder/repowiki/zh/content/系统概述.md)
-- [快速开始](.qoder/repowiki/zh/content/快速开始.md)
-- [系统架构设计](.qoder/repowiki/zh/content/系统架构设计)
-- [核心功能详解](.qoder/repowiki/zh/content/核心功能详解)
-- [数据库设计](.qoder/repowiki/zh/content/数据库设计)
-- [API参考文档](.qoder/repowiki/zh/content/API参考文档)
-- [前端架构](.qoder/repowiki/zh/content/前端架构)
-- [部署与运维](.qoder/repowiki/zh/content/部署与运维)
-- [安全指南](.qoder/repowiki/zh/content/安全指南)
-- [开发者指南](.qoder/repowiki/zh/content/开发者指南)
+- [系统概述](./.qoder/repowiki/zh/content/%E7%B3%BB%E7%BB%9F%E6%A6%82%E8%BF%B0.md)
+- [快速开始](./.qoder/repowiki/zh/content/%E5%BF%AB%E9%80%9F%E5%BC%80%E5%A7%8B.md)
+- [系统架构设计](./.qoder/repowiki/zh/content/%E7%B3%BB%E7%BB%9F%E6%9E%B6%E6%9E%84%E8%AE%BE%E8%AE%A1.md)
+- [核心功能详解](./.qoder/repowiki/zh/content/%E6%A0%B8%E5%BF%83%E5%8A%9F%E8%83%BD%E8%AF%A6%E8%A7%A3.md)
+- [数据库设计](./.qoder/repowiki/zh/content/%E6%95%B0%E6%8D%AE%E5%BA%93%E8%AE%BE%E8%AE%A1.md)
+- [API参考文档](./.qoder/repowiki/zh/content/API%E5%8F%82%E8%80%83%E6%96%87%E6%A1%A3.md)
+- [前端架构](./.qoder/repowiki/zh/content/%E5%89%8D%E7%AB%AF%E6%9E%B6%E6%9E%84.md)
+- [部署与运维](./.qoder/repowiki/zh/content/%E9%83%A8%E7%BD%B2%E4%B8%8E%E8%BF%90%E7%BB%B4.md)
+- [安全指南](./.qoder/repowiki/zh/content/%E5%AE%89%E5%85%A8%E6%8C%87%E5%8D%97.md)
+- [开发者指南](./.qoder/repowiki/zh/content/%E5%BC%80%E5%8F%91%E8%80%85%E6%8C%87%E5%8D%97.md)
 
 ## 🆕 最新更新
 
