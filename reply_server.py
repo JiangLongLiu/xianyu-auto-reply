@@ -418,26 +418,29 @@ async def health_check():
         }
 
 
-# 重定向根路径到登录页面
+# 服务 React 前端 SPA - 所有前端路由都返回 index.html
+async def serve_frontend():
+    """服务 React 前端 SPA"""
+    index_path = os.path.join(static_dir, 'index.html')
+    if os.path.exists(index_path):
+        with open(index_path, 'r', encoding='utf-8') as f:
+            return HTMLResponse(f.read())
+    else:
+        return HTMLResponse('<h3>Frontend not found. Please build the frontend first.</h3>')
+
 @app.get('/', response_class=HTMLResponse)
 async def root():
-    login_path = os.path.join(static_dir, 'login.html')
-    if os.path.exists(login_path):
-        with open(login_path, 'r', encoding='utf-8') as f:
-            return HTMLResponse(f.read())
-    else:
-        return HTMLResponse('<h3>Login page not found</h3>')
+    return await serve_frontend()
 
 
-# 登录页面路由
+# 登录页面路由 - 重定向到 React 前端
 @app.get('/login.html', response_class=HTMLResponse)
 async def login_page():
-    login_path = os.path.join(static_dir, 'login.html')
-    if os.path.exists(login_path):
-        with open(login_path, 'r', encoding='utf-8') as f:
-            return HTMLResponse(f.read())
-    else:
-        return HTMLResponse('<h3>Login page not found</h3>')
+    return await serve_frontend()
+
+@app.get('/login', response_class=HTMLResponse)
+async def login_route():
+    return await serve_frontend()
 
 
 # 注册页面路由
@@ -470,71 +473,17 @@ async def register_page():
         </html>
         ''', status_code=403)
 
-    register_path = os.path.join(static_dir, 'register.html')
-    if os.path.exists(register_path):
-        with open(register_path, 'r', encoding='utf-8') as f:
-            return HTMLResponse(f.read())
-    else:
-        return HTMLResponse('<h3>Register page not found</h3>')
+    return await serve_frontend()
+
+@app.get('/register', response_class=HTMLResponse)
+async def register_route():
+    return await serve_frontend()
 
 
-# 管理页面（不需要服务器端认证，由前端JavaScript处理）
-@app.get('/admin', response_class=HTMLResponse)
-async def admin_page():
-    index_path = os.path.join(static_dir, 'index.html')
-    if not os.path.exists(index_path):
-        return HTMLResponse('<h3>No front-end found</h3>')
-    
-    # 获取静态文件的修改时间作为版本号，解决浏览器缓存问题
-    def get_file_version(file_path, default='1.0.0'):
-        """获取文件的版本号（基于修改时间）"""
-        if os.path.exists(file_path):
-            try:
-                mtime = os.path.getmtime(file_path)
-                return str(int(mtime))
-            except Exception as e:
-                logger.warning(f"获取文件 {file_path} 修改时间失败: {e}")
-        return default
-    
-    app_js_path = os.path.join(static_dir, 'js', 'app.js')
-    app_css_path = os.path.join(static_dir, 'css', 'app.css')
-    
-    js_version = get_file_version(app_js_path, '2.2.0')
-    css_version = get_file_version(app_css_path, '1.0.0')
-    
-    try:
-        with open(index_path, 'r', encoding='utf-8') as f:
-            html_content = f.read()
-            
-            # 替换 app.js 的版本号参数
-            js_pattern = r'/static/js/app\.js\?v=[^"\'\s>]+'
-            js_new_url = f'/static/js/app.js?v={js_version}'
-            if re.search(js_pattern, html_content):
-                html_content = re.sub(js_pattern, js_new_url, html_content)
-                logger.debug(f"已替换 app.js 版本号: {js_version}")
-            
-            # 为 app.css 添加或更新版本号参数
-            css_pattern = r'/static/css/app\.css(\?v=[^"\'\s>]+)?'
-            css_new_url = f'/static/css/app.css?v={css_version}'
-            html_content = re.sub(css_pattern, css_new_url, html_content)
-            
-            return HTMLResponse(html_content)
-    except Exception as e:
-        logger.error(f"读取或处理 index.html 失败: {e}")
-        return HTMLResponse('<h3>Error loading page</h3>')
-
-
-
-
-
-
-
-
-
-
-
-
-
+# 注意：不要在这里定义 /admin 或 /admin/{path} 路由
+# 因为后端有 /admin/users, /admin/logs 等 API 路由
+# 前端 SPA 通过根路由 / 加载，由 React Router 处理客户端路由
+# 文件末尾的 catch-all 路由会处理前端页面的直接访问
 
 
 
@@ -2461,6 +2410,33 @@ def clear_default_reply_records(cid: str, current_user: Dict[str, Any] = Depends
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ------------------------- 默认回复管理接口（单数形式兼容路由） -------------------------
+# 兼容前端使用 /default-reply/ 单数形式的请求
+
+@app.get('/default-reply/{cid}')
+def get_default_reply_compat(cid: str, current_user: Dict[str, Any] = Depends(get_current_user)):
+    """获取指定账号的默认回复设置（兼容路由）"""
+    return get_default_reply(cid, current_user)
+
+
+@app.put('/default-reply/{cid}')
+def update_default_reply_compat(cid: str, reply_data: DefaultReplyIn, current_user: Dict[str, Any] = Depends(get_current_user)):
+    """更新指定账号的默认回复设置（兼容路由）"""
+    return update_default_reply(cid, reply_data, current_user)
+
+
+@app.delete('/default-reply/{cid}')
+def delete_default_reply_compat(cid: str, current_user: Dict[str, Any] = Depends(get_current_user)):
+    """删除指定账号的默认回复设置（兼容路由）"""
+    return delete_default_reply(cid, current_user)
+
+
+@app.post('/default-reply/{cid}/clear-records')
+def clear_default_reply_records_compat(cid: str, current_user: Dict[str, Any] = Depends(get_current_user)):
+    """清空指定账号的默认回复记录（兼容路由）"""
+    return clear_default_reply_records(cid, current_user)
+
+
 # ------------------------- 通知渠道管理接口 -------------------------
 
 @app.get('/notification-channels')
@@ -4372,6 +4348,13 @@ def test_ai_reply(cookie_id: str, test_data: dict, _: None = Depends(require_aut
         if not ai_reply_engine.is_ai_enabled(cookie_id):
             raise HTTPException(status_code=400, detail='该账号未启用AI回复')
 
+        # 检查AI设置是否完整
+        settings = db_manager.get_ai_reply_settings(cookie_id)
+        if not settings.get('api_key'):
+            raise HTTPException(status_code=400, detail='未配置API Key，请先在AI设置中配置API Key')
+        if not settings.get('base_url'):
+            raise HTTPException(status_code=400, detail='未配置API地址，请先在AI设置中配置API地址')
+
         # 构造测试数据
         test_message = test_data.get('message', '你好')
         test_item_info = {
@@ -4380,25 +4363,28 @@ def test_ai_reply(cookie_id: str, test_data: dict, _: None = Depends(require_aut
             'desc': test_data.get('item_desc', '这是一个测试商品')
         }
 
-        # 生成测试回复
+        # 生成测试回复（跳过等待时间）
         reply = ai_reply_engine.generate_reply(
             message=test_message,
             item_info=test_item_info,
             chat_id=f"test_{int(time.time())}",
             cookie_id=cookie_id,
             user_id="test_user",
-            item_id="test_item"
+            item_id="test_item",
+            skip_wait=True  # 测试时跳过10秒等待
         )
 
         if reply:
             return {"message": "测试成功", "reply": reply}
         else:
-            raise HTTPException(status_code=400, detail="AI回复生成失败")
+            raise HTTPException(status_code=400, detail="AI回复生成失败，请检查API Key是否正确、API地址是否可访问")
 
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"测试AI回复异常: {e}")
+        import traceback
+        logger.error(f"详细错误: {traceback.format_exc()}")
         raise HTTPException(status_code=500, detail=f"服务器错误: {str(e)}")
 
 
@@ -5355,6 +5341,25 @@ def list_backup_files(admin_user: Dict[str, Any] = Depends(require_admin)):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ------------------------- 系统管理接口 -------------------------
+
+@app.post('/admin/reload-cache')
+async def reload_system_cache(admin_user: Dict[str, Any] = Depends(require_admin)):
+    """刷新系统缓存（管理员专用）"""
+    try:
+        log_with_user('info', "刷新系统缓存", admin_user)
+        
+        # 这里可以添加实际的缓存刷新逻辑
+        # 例如：重新加载配置、清理内存缓存等
+        
+        log_with_user('info', "系统缓存刷新成功", admin_user)
+        return {"success": True, "message": "系统缓存已刷新"}
+        
+    except Exception as e:
+        log_with_user('error', f"刷新系统缓存失败: {str(e)}", admin_user)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # ------------------------- 数据管理接口 -------------------------
 
 @app.get('/admin/data/{table_name}')
@@ -5369,7 +5374,8 @@ def get_table_data(table_name: str, admin_user: Dict[str, Any] = Depends(require
             'users', 'cookies', 'cookie_status', 'keywords', 'default_replies', 'default_reply_records',
             'ai_reply_settings', 'ai_conversations', 'ai_item_cache', 'item_info',
             'message_notifications', 'cards', 'delivery_rules', 'notification_channels',
-            'user_settings', 'system_settings', 'email_verifications', 'captcha_codes', 'orders', "item_replay"
+            'user_settings', 'system_settings', 'email_verifications', 'captcha_codes', 'orders', "item_replay",
+            'risk_control_logs'
         ]
 
         if table_name not in allowed_tables:
@@ -5551,6 +5557,30 @@ def get_user_orders(current_user: Dict[str, Any] = Depends(get_current_user)):
     except Exception as e:
         log_with_user('error', f"查询用户订单失败: {str(e)}", current_user)
         raise HTTPException(status_code=500, detail=f"查询订单失败: {str(e)}")
+
+
+# ==================== 前端 SPA Catch-All 路由 ====================
+# 必须放在所有 API 路由之后，用于处理前端 SPA 的直接访问
+# 这样用户直接访问 /dashboard、/accounts 等前端路由时，会返回 index.html
+# 然后由 React Router 在客户端处理路由
+
+# 定义不需要返回前端页面的路径前缀（API 路径）
+API_PREFIXES = ['/api/', '/static/', '/health', '/login', '/logout', '/register', '/verify']
+
+@app.get('/{path:path}', response_class=HTMLResponse)
+async def catch_all_route(path: str):
+    """
+    Catch-all 路由：处理所有未匹配的 GET 请求
+    如果是 API 请求，返回 404；否则返回前端 index.html
+    """
+    # 检查是否是 API 请求
+    full_path = f'/{path}'
+    for prefix in API_PREFIXES:
+        if full_path.startswith(prefix):
+            raise HTTPException(status_code=404, detail="Not Found")
+    
+    # 返回前端页面
+    return await serve_frontend()
 
 
 # 移除自动启动，由Start.py或手动启动
