@@ -43,6 +43,18 @@ venv.bak/
 temp/
 tmp/
 
+# RK3566 iStoreOS 构建配置文件（包含敏感信息，不推送到公开仓库）
+password.txt
+ssh-exec.py
+sftp-upload.py
+config-docker.py
+config-docker-proxy.py
+check-build.py
+setup-ssh-key.ps1
+docker-compose-mybuild.yml
+Git双remote配置指南.md
+docker镜像构建文档-rk3566-iStoreOS.md
+
 # OS generated files
 .DS_Store
 .DS_Store?
