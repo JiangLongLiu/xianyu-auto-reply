@@ -96,6 +96,10 @@ RUN apt-get update && \
         libfreetype6-dev \
         fonts-dejavu-core \
         fonts-liberation \
+        # Xvfb虚拟显示服务器（解决容器内浏览器启动问题）
+        xvfb \
+        x11-utils \
+        x11vnc \
         # Playwright浏览器依赖
         libnss3 \
         libnspr4 \

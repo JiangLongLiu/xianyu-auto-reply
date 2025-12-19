@@ -48,6 +48,35 @@ python -c "import fastapi, uvicorn, loguru, websockets" 2>/dev/null || {
 }
 echo "✓ Python 依赖检查完成"
 
+# 启动Xvfb虚拟显示服务器（解决容器内浏览器启动问题）
+echo "启动Xvfb虚拟显示服务器..."
+if command -v Xvfb >/dev/null 2>&1; then
+    # 启动Xvfb在后台
+    # :99 - 显示编号
+    # -screen 0 1920x1080x24 - 屏幕分辨率和颜色深度
+    # -ac - 禁用访问控制
+    # +extension GLX - 启用OpenGL支持
+    # +render - 启用渲染扩展
+    # -noreset - 保持运行不退出
+    Xvfb :99 -screen 0 1920x1080x24 -ac +extension GLX +render -noreset >/dev/null 2>&1 &
+    XVFB_PID=$!
+    
+    # 设置DISPLAY环境变量
+    export DISPLAY=:99
+    
+    # 等待Xvfb启动
+    sleep 2
+    
+    # 验证Xvfb是否正常运行
+    if ps -p $XVFB_PID > /dev/null; then
+        echo "✓ Xvfb启动成功 (PID: $XVFB_PID, DISPLAY: $DISPLAY)"
+    else
+        echo "⚠ 警告: Xvfb启动失败，浏览器可能无法使用图形界面"
+    fi
+else
+    echo "⚠ 警告: Xvfb未安装，滑块验证可能失败"
+fi
+
 # 迁移数据库文件到data目录（如果需要）
 echo "检查数据库文件位置..."
 if [ -f "/app/xianyu_data.db" ] && [ ! -f "/app/data/xianyu_data.db" ]; then
@@ -90,4 +119,5 @@ echo "正在启动应用..."
 echo ""
 
 # 使用 exec 替换当前 shell，这样 Python 进程可以接收信号
-exec python Start.py
+# 设置DISPLAY环境变量以支持Xvfb
+exec env DISPLAY=:99 python Start.py
