@@ -310,6 +310,92 @@ export function Settings() {
             </div>
           </div>
 
+          {/* 自动回复设置 - 打字模拟 */}
+          <div className="vben-card">
+            <div className="vben-card-header">
+              <h2 className="vben-card-title">
+                <Bot className="w-4 h-4" />
+                自动回复设置
+              </h2>
+            </div>
+            <div className="vben-card-body space-y-4">
+              {/* 启用打字模拟开关 */}
+              <div className="flex items-center justify-between py-3 border-b border-slate-100 dark:border-slate-700">
+                <div>
+                  <p className="font-medium text-slate-900 dark:text-slate-100">启用打字模拟</p>
+                  <p className="text-sm text-slate-500 dark:text-slate-400">
+                    模拟真人打字速度，根据消息长度延迟发送
+                  </p>
+                </div>
+                <label className="switch-ios">
+                  <input
+                    type="checkbox"
+                    checked={Boolean(settings?.typing_simulation_enabled ?? true)}
+                    onChange={(e) => setSettings(s => s ? { ...s, typing_simulation_enabled: e.target.checked } : null)}
+                  />
+                  <span className="switch-slider"></span>
+                </label>
+              </div>
+
+              {/* 延迟参数配置 - 仅在启用时显示 */}
+              {settings?.typing_simulation_enabled !== false && (
+                <div className="space-y-4 pt-2">
+                  <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    <div className="input-group">
+                      <label className="input-label">思考时间（秒）</label>
+                      <input
+                        type="number"
+                        step="0.1"
+                        min="0"
+                        max="10"
+                        value={settings?.typing_thinking_delay ?? 1.5}
+                        onChange={(e) => setSettings(s => s ? { ...s, typing_thinking_delay: parseFloat(e.target.value) || 1.5 } : null)}
+                        className="input-ios"
+                      />
+                      <p className="text-xs text-slate-400 mt-1">回复前的基础思考时间</p>
+                    </div>
+                    <div className="input-group">
+                      <label className="input-label">每字符延迟（秒）</label>
+                      <input
+                        type="number"
+                        step="0.01"
+                        min="0"
+                        max="1"
+                        value={settings?.typing_char_delay ?? 0.08}
+                        onChange={(e) => setSettings(s => s ? { ...s, typing_char_delay: parseFloat(e.target.value) || 0.08 } : null)}
+                        className="input-ios"
+                      />
+                      <p className="text-xs text-slate-400 mt-1">每个字符的输入时间</p>
+                    </div>
+                    <div className="input-group">
+                      <label className="input-label">最大延迟（秒）</label>
+                      <input
+                        type="number"
+                        step="0.5"
+                        min="1"
+                        max="30"
+                        value={settings?.typing_max_delay ?? 8.0}
+                        onChange={(e) => setSettings(s => s ? { ...s, typing_max_delay: parseFloat(e.target.value) || 8.0 } : null)}
+                        className="input-ios"
+                      />
+                      <p className="text-xs text-slate-400 mt-1">延迟时间上限</p>
+                    </div>
+                  </div>
+                  
+                  {/* 延迟计算示例 */}
+                  <div className="bg-slate-50 dark:bg-slate-800/50 rounded-lg p-3">
+                    <p className="text-sm font-medium text-slate-700 dark:text-slate-300 mb-2">延迟计算示例：</p>
+                    <div className="text-xs text-slate-500 dark:text-slate-400 space-y-1">
+                      <p>• 10字消息: {((settings?.typing_thinking_delay ?? 1.5) + 10 * (settings?.typing_char_delay ?? 0.08)).toFixed(1)}秒</p>
+                      <p>• 30字消息: {Math.min((settings?.typing_thinking_delay ?? 1.5) + 30 * (settings?.typing_char_delay ?? 0.08), settings?.typing_max_delay ?? 8.0).toFixed(1)}秒</p>
+                      <p>• 50字消息: {Math.min((settings?.typing_thinking_delay ?? 1.5) + 50 * (settings?.typing_char_delay ?? 0.08), settings?.typing_max_delay ?? 8.0).toFixed(1)}秒</p>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+
           {/* AI Settings */}
           <div className="vben-card">
             <div className="vben-card-header">

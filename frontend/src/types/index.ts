@@ -186,6 +186,11 @@ export interface SystemSettings {
   smtp_use_ssl?: boolean
   // API安全
   qq_reply_secret_key?: string
+  // 打字模拟设置
+  typing_simulation_enabled?: boolean
+  typing_thinking_delay?: number
+  typing_char_delay?: number
+  typing_max_delay?: number
   [key: string]: unknown
 }
 

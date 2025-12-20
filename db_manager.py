@@ -434,7 +434,11 @@ class DBManager:
             ('smtp_from', '', '发件人显示名（留空则使用用户名）'),
             ('smtp_use_tls', 'true', '是否启用TLS'),
             ('smtp_use_ssl', 'false', '是否启用SSL'),
-            ('qq_reply_secret_key', 'xianyu_qq_reply_2024', 'QQ回复消息API秘钥')
+            ('qq_reply_secret_key', 'xianyu_qq_reply_2024', 'QQ回复消息API秘钥'),
+            ('typing_simulation_enabled', 'true', '是否启用打字模拟'),
+            ('typing_thinking_delay', '1.5', '思考时间（秒）'),
+            ('typing_char_delay', '0.08', '每字符延迟（秒）'),
+            ('typing_max_delay', '8.0', '最大延迟上限（秒）')
             ''')
 
             # 检查并升级数据库

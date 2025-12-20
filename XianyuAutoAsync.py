@@ -5167,6 +5167,51 @@ class XianyuLive:
         }
         await ws.send(json.dumps(msg))
 
+    async def send_msg_with_typing_delay(self, ws, cid, toid, text):
+        """
+        模拟真人打字延迟后发送消息
+        
+        延迟计算公式：
+        delay = thinking_delay + (char_count * char_delay)
+        final_delay = min(delay, max_delay)
+        """
+        import random
+        from db_manager import db_manager
+        
+        # 获取配置
+        enabled = db_manager.get_system_setting('typing_simulation_enabled')
+        if enabled != 'true':
+            # 未启用，直接发送
+            await self.send_msg(ws, cid, toid, text)
+            return
+        
+        try:
+            thinking_delay = float(db_manager.get_system_setting('typing_thinking_delay') or '1.5')
+            char_delay = float(db_manager.get_system_setting('typing_char_delay') or '0.08')
+            max_delay = float(db_manager.get_system_setting('typing_max_delay') or '8.0')
+        except (ValueError, TypeError):
+            thinking_delay, char_delay, max_delay = 1.5, 0.08, 8.0
+        
+        # 计算延迟时间
+        char_count = len(text)
+        
+        # 添加随机因子，使延迟更自然（±20%）
+        thinking_with_random = thinking_delay * random.uniform(0.8, 1.2)
+        char_delay_with_random = char_delay * random.uniform(0.8, 1.2)
+        
+        # 总延迟
+        total_delay = thinking_with_random + (char_count * char_delay_with_random)
+        final_delay = min(total_delay, max_delay)
+        
+        # 记录日志
+        logger.info(f"【打字模拟】消息长度: {char_count}字, 延迟: {final_delay:.2f}秒")
+        
+        # 执行延迟
+        await asyncio.sleep(final_delay)
+        
+        # 发送消息
+        await self.send_msg(ws, cid, toid, text)
+
     async def init(self, ws):
         # 如果没有token或者token过期，获取新token
         token_refresh_attempted = False
@@ -7185,8 +7230,8 @@ class XianyuLive:
                         msg_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
                         logger.error(f"[{msg_time}] 【{reply_source}图片发送失败】用户: {send_user_name} (ID: {send_user_id}), 商品({item_id})")
                 else:
-                    # 普通文本消息
-                    await self.send_msg(websocket, chat_id, send_user_id, reply)
+                    # 普通文本消息 - 使用打字模拟延迟发送
+                    await self.send_msg_with_typing_delay(websocket, chat_id, send_user_id, reply)
                     # 记录发出的消息
                     msg_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
                     logger.info(f"[{msg_time}] 【{reply_source}发出】用户: {send_user_name} (ID: {send_user_id}), 商品({item_id}): {reply}")
