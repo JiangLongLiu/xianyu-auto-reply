@@ -386,9 +386,9 @@ export function Settings() {
                   <div className="bg-slate-50 dark:bg-slate-800/50 rounded-lg p-3">
                     <p className="text-sm font-medium text-slate-700 dark:text-slate-300 mb-2">延迟计算示例：</p>
                     <div className="text-xs text-slate-500 dark:text-slate-400 space-y-1">
-                      <p>• 10字消息: {((settings?.typing_thinking_delay ?? 1.5) + 10 * (settings?.typing_char_delay ?? 0.08)).toFixed(1)}秒</p>
-                      <p>• 30字消息: {Math.min((settings?.typing_thinking_delay ?? 1.5) + 30 * (settings?.typing_char_delay ?? 0.08), settings?.typing_max_delay ?? 8.0).toFixed(1)}秒</p>
-                      <p>• 50字消息: {Math.min((settings?.typing_thinking_delay ?? 1.5) + 50 * (settings?.typing_char_delay ?? 0.08), settings?.typing_max_delay ?? 8.0).toFixed(1)}秒</p>
+                      <p>• 10字消息: {(Number(settings?.typing_thinking_delay ?? 1.5) + 10 * Number(settings?.typing_char_delay ?? 0.08)).toFixed(1)}秒</p>
+                      <p>• 30字消息: {Math.min(Number(settings?.typing_thinking_delay ?? 1.5) + 30 * Number(settings?.typing_char_delay ?? 0.08), Number(settings?.typing_max_delay ?? 8.0)).toFixed(1)}秒</p>
+                      <p>• 50字消息: {Math.min(Number(settings?.typing_thinking_delay ?? 1.5) + 50 * Number(settings?.typing_char_delay ?? 0.08), Number(settings?.typing_max_delay ?? 8.0)).toFixed(1)}秒</p>
                     </div>
                   </div>
                 </div>
