@@ -2802,9 +2802,14 @@ class XianyuLive:
                     'card_type': item.get('card_type', 0)
                 }
 
-                # 检查数据库中是否已有详情
+                # 检查数据库中是否已有详情页文本（不是JSON）
                 existing_item = db_manager.get_item_info(self.cookie_id, item_id)
-                has_detail = existing_item and existing_item.get('item_detail') and existing_item['item_detail'].strip()
+                has_detail_text = False
+                if existing_item and existing_item.get('item_detail'):
+                    detail_content = existing_item['item_detail'].strip()
+                    # 如果是JSON格式（以{开头），说明只有基本信息，没有详情页文本
+                    # 只有当内容不是JSON格式时，才认为已有详情页文本
+                    has_detail_text = detail_content and not detail_content.startswith('{')
 
                 batch_data.append({
                     'cookie_id': self.cookie_id,
@@ -2816,8 +2821,8 @@ class XianyuLive:
                     'item_detail': json.dumps(item_detail, ensure_ascii=False)
                 })
 
-                # 如果没有详情，添加到需要获取详情的列表
-                if not has_detail:
+                # 如果没有详情页文本，添加到需要获取详情的列表
+                if not has_detail_text:
                     items_need_detail.append({
                         'item_id': item_id,
                         'item_title': item.get('title', '')
