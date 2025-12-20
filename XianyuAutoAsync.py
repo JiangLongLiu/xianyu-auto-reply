@@ -2664,14 +2664,17 @@ class XianyuLive:
                 ])
 
             browser = await playwright.chromium.launch(
-                headless=True,
+                headless=True,  # 移动模式使用无头模式
                 args=browser_args
             )
 
-            # 创建浏览器上下文
+            # 创建移动设备浏览器上下文（模拟iPhone）
             context = await browser.new_context(
-                viewport={'width': 1920, 'height': 1080},
-                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/138.0.0.0 Safari/537.36'
+                viewport={'width': 375, 'height': 812},  # iPhone X/11/12 尺寸
+                user_agent='Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/15E148 AliApp(TB/11.15.0)',
+                device_scale_factor=3,  # iPhone 的屏幕缩放比例
+                is_mobile=True,
+                has_touch=True
             )
 
             # 设置Cookie
@@ -2687,33 +2690,56 @@ class XianyuLive:
                     })
 
             await context.add_cookies(cookies)
-            logger.warning(f"已设置 {len(cookies)} 个Cookie")
+            logger.info(f"已设置 {len(cookies)} 个Cookie（移动模式）")
 
             # 创建页面
             page = await context.new_page()
 
-            # 构造商品详情页面URL
-            item_url = f"https://www.goofish.com/item?id={item_id}"
-            logger.info(f"访问商品页面: {item_url}")
+            # 构造移动版商品详情页面URL
+            item_url = f"https://h5.m.goofish.com/item?id={item_id}"
+            logger.info(f"访问移动版商品页面: {item_url}")
 
             # 访问页面
             await page.goto(item_url, wait_until='networkidle', timeout=30000)
 
             # 等待页面完全加载
-            await asyncio.sleep(3)
+            await asyncio.sleep(2)
 
             # 获取商品详情内容
             detail_text = ""
             try:
-                # 等待目标元素出现
-                await page.wait_for_selector('.desc--GaIUKUQY', timeout=10000)
-
-                # 获取商品详情文本
-                detail_element = await page.query_selector('.desc--GaIUKUQY')
-                if detail_element:
-                    detail_text = await detail_element.inner_text()
-                    logger.info(f"成功获取商品详情: {item_id}, 长度: {len(detail_text)}")
-                    return detail_text.strip()
+                # 移动版页面选择器列表（按优先级排序）
+                selectors = [
+                    '.detailDesc--descText--1FMDTCm',  # 移动版商品详情主选择器
+                    'span.rax-text-v2.detailDesc--descText--1FMDTCm',  # 完整选择器
+                    '[class*="detailDesc--descText"]',  # 匹配包含detailDesc--descText的类名
+                    '[class*="descText"]',  # 匹配包含descText的类名
+                    '.desc--GaIUKUQY',  # PC版选择器（备用）
+                    '.detail-desc',     # 常见的详情选择器
+                    '.item-desc',       # 商品描述
+                    '[class*="desc"]',  # 包含desc的类名
+                ]
+                
+                for selector in selectors:
+                    try:
+                        # 尝试等待元素出现（短超时）
+                        await page.wait_for_selector(selector, timeout=3000)
+                        detail_element = await page.query_selector(selector)
+                        if detail_element:
+                            detail_text = await detail_element.inner_text()
+                            if detail_text and len(detail_text.strip()) > 0:
+                                logger.info(f"成功获取商品详情（选择器: {selector}）: {item_id}, 长度: {len(detail_text)}")
+                                return detail_text.strip()
+                    except Exception as e:
+                        logger.debug(f"选择器 {selector} 未找到: {self._safe_str(e)}")
+                        continue
+                
+                # 如果所有选择器都失败，尝试获取整个页面的文本内容
+                logger.warning(f"未找到特定详情元素，尝试获取整个页面内容: {item_id}")
+                body_text = await page.inner_text('body')
+                if body_text:
+                    logger.info(f"获取到页面整体内容: {item_id}, 长度: {len(body_text)}")
+                    return body_text.strip()
                 else:
                     logger.warning(f"未找到商品详情元素: {item_id}")
 
