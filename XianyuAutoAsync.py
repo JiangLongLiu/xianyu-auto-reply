@@ -1283,11 +1283,12 @@ class XianyuLive:
 
 
 
-    async def refresh_token(self, captcha_retry_count: int = 0):
+    async def refresh_token(self, captcha_retry_count: int = 0, token_expiry_retry_count: int = 0):
         """刷新token
 
         Args:
             captcha_retry_count: 滑块验证重试次数，用于防止无限递归
+            token_expiry_retry_count: 令牌过期重试次数，最多重试1次（独立于滑块验证计数）
         """
         # 初始化通知发送标志，避免重复发送通知
         notification_sent = False
@@ -1298,6 +1299,24 @@ class XianyuLive:
             self.last_token_refresh_status = "started"
             # 重置“刷新流程内已重启”标记，避免多次重启
             self.restarted_in_browser_refresh = False
+
+            # 检查数据库Token缓存（仅首次调用时，滑块重试时跳过缓存使用最新Cookie重新获取）
+            if captcha_retry_count == 0:
+                try:
+                    from db_manager import db_manager
+                    cached = db_manager.get_cached_token(self.myid)
+                    if cached:
+                        cached_token = cached['token']
+                        cached_device_id = cached['device_id']
+                        # 恢复device_id，确保后续注册用同一个
+                        self.device_id = cached_device_id
+                        self.current_token = cached_token
+                        self.last_token_refresh_time = time.time()
+                        self.last_token_refresh_status = "success_from_cache"
+                        logger.info(f"【{self.cookie_id}】使用数据库缓存的Token和Device ID")
+                        return cached_token
+                except Exception as cache_e:
+                    logger.warning(f"【{self.cookie_id}】检查Token缓存异常，继续正常刷新: {self._safe_str(cache_e)}")
 
             # 检查滑块验证重试次数，防止无限递归
             if captcha_retry_count >= self.max_captcha_verification_count:
@@ -1461,22 +1480,16 @@ class XianyuLive:
                     logger.info(f"【{self.cookie_id}】  响应内容: {json.dumps(res_json, ensure_ascii=False, indent=2)}")
                     logger.info(f"【{self.cookie_id}】================================")
 
-                    # 检查并更新Cookie
-                    if 'set-cookie' in response.headers:
-                        new_cookies = {}
-                        for cookie in response.headers.getall('set-cookie', []):
-                            if '=' in cookie:
-                                name, value = cookie.split(';')[0].split('=', 1)
-                                new_cookies[name.strip()] = value.strip()
-
-                        # 更新cookies
-                        if new_cookies:
-                            self.cookies.update(new_cookies)
-                            # 生成新的cookie字符串
-                            self.cookies_str = '; '.join([f"{k}={v}" for k, v in self.cookies.items()])
-                            # 更新数据库中的Cookie
-                            await self.update_config_cookies()
-                            logger.warning("已更新Cookie到数据库")
+                    # 检查并更新Cookie（使用通用工具函数）
+                    from utils.xianyu_utils import extract_cookies_from_response, is_token_expired_error, is_session_expired_error
+                    new_cookies = extract_cookies_from_response(response)
+                    has_new_cookies = False
+                    if new_cookies:
+                        self.cookies.update(new_cookies)
+                        self.cookies_str = '; '.join([f"{k}={v}" for k, v in self.cookies.items()])
+                        await self.update_config_cookies()
+                        has_new_cookies = True
+                        logger.info(f"【{self.cookie_id}】Token刷新接口已从Set-Cookie合并 {len(new_cookies)} 个Cookie字段并更新到数据库")
 
                     if isinstance(res_json, dict):
                         ret_value = res_json.get('ret', [])
@@ -1494,6 +1507,12 @@ class XianyuLive:
                                 logger.info(f"【{self.cookie_id}】Token刷新成功")
                                 # 标记为成功
                                 self.last_token_refresh_status = "success"
+                                # 缓存token和device_id到数据库
+                                try:
+                                    from db_manager import db_manager
+                                    db_manager.set_cached_token(self.myid, new_token, self.device_id)
+                                except Exception as cache_e:
+                                    logger.warning(f"【{self.cookie_id}】缓存Token失败: {self._safe_str(cache_e)}")
                                 return new_token
 
                     # 检查是否需要滑块验证
@@ -1547,6 +1566,13 @@ class XianyuLive:
                                 # 重启实例（cookies已在_handle_captcha_verification中更新到数据库）
                                 # await self._restart_instance()
                                 
+                                # 滑块验证成功后，清除旧缓存并重新获取token
+                                try:
+                                    from db_manager import db_manager
+                                    db_manager.delete_cached_token(self.myid)
+                                except Exception as del_e:
+                                    logger.warning(f"【{self.cookie_id}】清除Token缓存失败: {self._safe_str(del_e)}")
+                                
                                 # 重新尝试刷新token（递归调用，但有深度限制）
                                 return await self.refresh_token(captcha_retry_count + 1)
                             else:
@@ -1586,28 +1612,57 @@ class XianyuLive:
                             # 标记已发送通知（通知已在_handle_captcha_verification中发送）
                             notification_sent = True
 
-                    # 检查是否包含"令牌过期"或"Session过期"
+                    # 区分处理令牌过期和Session过期（利用前面已提取的has_new_cookies和ret_value）
                     if isinstance(res_json, dict):
-                        res_json_str = json.dumps(res_json, ensure_ascii=False, separators=(',', ':'))
-                        if '令牌过期' in res_json_str or 'Session过期' in res_json_str:
-                            # 调用统一的密码登录刷新方法
-                            refresh_success = await self._try_password_login_refresh("令牌/Session过期")
+                        # 【令牌过期】Cookie已在前面更新，独立计数重试（不触发密码登录，不消耗滑块重试配额）
+                        if is_token_expired_error(ret_value) and token_expiry_retry_count < 1:
+                            if has_new_cookies:
+                                logger.warning(f"【{self.cookie_id}】令牌过期，已从Set-Cookie更新Cookie，准备重试（第{token_expiry_retry_count + 1}次）...")
+                            else:
+                                logger.warning(f"【{self.cookie_id}】令牌过期但响应中没有Set-Cookie，仍尝试重试...")
+                            # 清除Token缓存
+                            try:
+                                from db_manager import db_manager
+                                db_manager.delete_cached_token(self.myid)
+                            except Exception as del_e:
+                                logger.warning(f"【{self.cookie_id}】清除Token缓存失败: {self._safe_str(del_e)}")
+                            # 用更新后的Cookie重试一次（独立计数，不影响captcha_retry_count）
+                            return await self.refresh_token(
+                                captcha_retry_count=captcha_retry_count,
+                                token_expiry_retry_count=token_expiry_retry_count + 1
+                            )
+                        
+                        # 令牌过期重试已达上限
+                        if is_token_expired_error(ret_value) and token_expiry_retry_count >= 1:
+                            logger.warning(f"【{self.cookie_id}】令牌过期重试已达上限（{token_expiry_retry_count}次），不再重试")
+                        
+                        # 【Session过期】才触发密码登录
+                        if is_session_expired_error(ret_value):
+                            logger.warning(f"【{self.cookie_id}】Session过期，触发密码登录...")
+                            refresh_success = await self._try_password_login_refresh("Session过期")
                             
                             if not refresh_success:
-                                # 标记已发送通知，避免重复通知
                                 notification_sent = True
-                                # 返回None，让调用者知道刷新失败
                                 return None
                             else:
-                                # 刷新成功后，重新尝试获取token
+                                # 密码登录成功后，清除旧缓存并重新获取token
+                                try:
+                                    from db_manager import db_manager
+                                    db_manager.delete_cached_token(self.myid)
+                                except Exception as del_e:
+                                    logger.warning(f"【{self.cookie_id}】清除Token缓存失败: {self._safe_str(del_e)}")
                                 return await self.refresh_token(captcha_retry_count)
-                                
-                                # 刷新失败时继续执行原有的失败处理逻辑
 
                     logger.error(f"【{self.cookie_id}】Token刷新失败: {res_json}")
 
                     # 清空当前token，确保下次重试时重新获取
                     self.current_token = None
+                    # 清除数据库中的Token缓存
+                    try:
+                        from db_manager import db_manager
+                        db_manager.delete_cached_token(self.myid)
+                    except Exception as del_e:
+                        logger.warning(f"【{self.cookie_id}】清除Token缓存失败: {self._safe_str(del_e)}")
 
                     # 只有在没有发送过通知的情况下才发送Token刷新失败通知
                     # 并且WebSocket未连接时才发送（已连接说明只是暂时失败）
@@ -1633,6 +1688,12 @@ class XianyuLive:
 
             # 清空当前token，确保下次重试时重新获取
             self.current_token = None
+            # 清除数据库中的Token缓存
+            try:
+                from db_manager import db_manager
+                db_manager.delete_cached_token(self.myid)
+            except Exception as del_e:
+                logger.warning(f"【{self.cookie_id}】清除Token缓存失败: {self._safe_str(del_e)}")
 
             # 只有在没有发送过通知的情况下才发送Token刷新异常通知
             # 并且WebSocket未连接时才发送（已连接说明只是暂时失败）
@@ -1734,7 +1795,7 @@ class XianyuLive:
                     # user_id=f"{self.cookie_id}_{int(time.time() * 1000)}",  # 使用唯一ID避免冲突
                     user_id=f"{self.cookie_id}",  # 使用唯一ID避免冲突
                     enable_learning=True,  # 启用学习功能
-                    headless=False  # 使用有头模式（可视化浏览器）
+                    headless=True  # 使用无头模式
                 )
 
                 # 在线程池中执行滑块验证
@@ -1993,6 +2054,13 @@ class XianyuLive:
                 # 更新数据库中的cookies
                 await self.update_config_cookies()
                 logger.info(f"【{self.cookie_id}】数据库cookies更新成功")
+
+                # Cookie已变更，清除旧的Token缓存（新Cookie需要重新获取Token）
+                try:
+                    from db_manager import db_manager
+                    db_manager.delete_cached_token(self.myid)
+                except Exception as del_e:
+                    logger.warning(f"【{self.cookie_id}】清除Token缓存失败: {self._safe_str(del_e)}")
 
                 # 通过CookieManager重启任务
                 logger.info(f"【{self.cookie_id}】通过CookieManager重启任务...")
@@ -2972,36 +3040,39 @@ class XianyuLive:
             ) as response:
                 res_json = await response.json()
 
-                # 检查并更新Cookie
-                if 'set-cookie' in response.headers:
-                    new_cookies = {}
-                    for cookie in response.headers.getall('set-cookie', []):
-                        if '=' in cookie:
-                            name, value = cookie.split(';')[0].split('=', 1)
-                            new_cookies[name.strip()] = value.strip()
+                # 检查并更新Cookie（使用通用工具函数）
+                from utils.xianyu_utils import extract_cookies_from_response, is_token_expired_error, is_session_expired_error
+                new_cookies = extract_cookies_from_response(response)
+                if new_cookies:
+                    self.cookies.update(new_cookies)
+                    self.cookies_str = '; '.join([f"{k}={v}" for k, v in self.cookies.items()])
+                    await self.update_config_cookies()
+                    logger.info(f"【{self.cookie_id}】商品详情接口已从Set-Cookie合并 {len(new_cookies)} 个Cookie字段并更新到数据库")
 
-                    # 更新cookies
-                    if new_cookies:
-                        self.cookies.update(new_cookies)
-                        # 生成新的cookie字符串
-                        self.cookies_str = '; '.join([f"{k}={v}" for k, v in self.cookies.items()])
-                        # 更新数据库中的Cookie
-                        await self.update_config_cookies()
-                        logger.warning("已更新Cookie到数据库")
-
-                logger.warning(f"商品信息获取成功: {res_json}")
                 # 检查返回状态
                 if isinstance(res_json, dict):
                     ret_value = res_json.get('ret', [])
-                    # 检查ret是否包含成功信息
-                    if not any('SUCCESS::调用成功' in ret for ret in ret_value):
-                        logger.warning(f"商品信息API调用失败，错误信息: {ret_value}")
-
+                    # 成功
+                    if any('SUCCESS::调用成功' in ret for ret in ret_value):
+                        logger.info(f"商品信息获取成功: {item_id}")
+                        return res_json
+                    
+                    # 【令牌过期】使用已更新的Cookie重试（不触发密码登录）
+                    if is_token_expired_error(ret_value):
+                        logger.warning(f"【{self.cookie_id}】商品详情接口令牌过期，使用新Cookie重试...")
                         await asyncio.sleep(0.5)
                         return await self.get_item_info(item_id, retry_count + 1)
-                    else:
-                        logger.warning(f"商品信息获取成功: {item_id}")
-                        return res_json
+                    
+                    # 【Session过期】触发密码登录（不阻塞，不重试当前请求）
+                    if is_session_expired_error(ret_value):
+                        logger.warning(f"【{self.cookie_id}】商品详情接口Session过期，触发密码登录...")
+                        await self._try_password_login_refresh("Session过期(商品详情)")
+                        return {"error": f"Session过期: {ret_value}"}
+                    
+                    # 其他错误，普通重试
+                    logger.warning(f"商品信息API调用失败，错误信息: {ret_value}")
+                    await asyncio.sleep(0.5)
+                    return await self.get_item_info(item_id, retry_count + 1)
                 else:
                     logger.error(f"商品信息API返回格式异常: {res_json}")
                     return await self.get_item_info(item_id, retry_count + 1)
@@ -3119,79 +3190,102 @@ class XianyuLive:
         except Exception as e:
             logger.error(f"调试消息结构时发生错误: {self._safe_str(e)}")
 
-    async def get_default_reply(self, send_user_name: str, send_user_id: str, send_message: str, chat_id: str, item_id: str = None) -> str:
-        """获取默认回复内容，支持指定商品回复、变量替换和只回复一次功能"""
+    async def get_default_reply(self, send_user_name: str, send_user_id: str, send_message: str, chat_id: str, item_id: str = None) -> dict:
+        """获取默认回复内容，支持商品级别默认回复、变量替换、只回复一次功能和图片发送
+        
+        优先级：商品默认回复 > 账号默认回复
+        
+        Returns:
+            dict: 包含 'text' (文字回复) 和 'image_url' (图片URL，可选) 的字典
+                  或 None (无回复)
+                  或 "EMPTY_REPLY" (空回复标记)
+        """
         try:
             from db_manager import db_manager
 
-            # 1. 优先检查指定商品回复
+            # 1. 优先检查商品级别默认回复
             if item_id:
-                item_reply = db_manager.get_item_reply(self.cookie_id, item_id)
-                if item_reply and item_reply.get('reply_content'):
-                    reply_content = item_reply['reply_content']
-                    logger.info(f"【{self.cookie_id}】使用指定商品回复: 商品ID={item_id}")
+                logger.info(f"【{self.cookie_id}】检查商品默认回复: item_id={item_id}, cookie_id={self.cookie_id}")
+                item_default_reply = db_manager.get_item_default_reply(self.cookie_id, item_id)
+                logger.info(f"【{self.cookie_id}】商品默认回复查询结果: {item_default_reply}")
+                if item_default_reply and item_default_reply.get('reply_content', False):
+                    reply_content = item_default_reply.get('reply_content', '')
+
+                    # 如果文字和图片都为空，返回空回复标记
+                    if (not reply_content or reply_content.strip() == '') and (True):
+                        logger.info(f"【{self.cookie_id}】商品 {item_id} 默认回复内容和图片都为空，不进行回复")
+                        return "EMPTY_REPLY"
+
+                    # 检查"只回复一次"功能（商品级别）
+                    if True and chat_id:
+                        if db_manager.has_default_reply_record(self.cookie_id, chat_id, item_id):
+                            logger.info(f"【{self.cookie_id}】商品 {item_id} 已对用户 {chat_id} 回复过，跳过（只回复一次）")
+                            return "ALREADY_REPLIED"
 
                     # 进行变量替换
-                    try:
-                        formatted_reply = reply_content.format(
-                            send_user_name=send_user_name,
-                            send_user_id=send_user_id,
-                            send_message=send_message,
-                            item_id=item_id
-                        )
-                        logger.info(f"【{self.cookie_id}】指定商品回复内容: {formatted_reply}")
-                        return formatted_reply
-                    except Exception as format_error:
-                        logger.error(f"指定商品回复变量替换失败: {self._safe_str(format_error)}")
-                        # 如果变量替换失败，返回原始内容
-                        return reply_content
-                else:
-                    logger.warning(f"【{self.cookie_id}】商品ID {item_id} 没有配置指定回复，使用默认回复")
+                    formatted_reply = ''
+                    if reply_content and reply_content.strip():
+                        try:
+                            formatted_reply = reply_content.format(
+                                send_user_name=send_user_name,
+                                send_user_id=send_user_id,
+                                send_message=send_message,
+                                item_id=item_id
+                            )
+                        except Exception as format_error:
+                            logger.error(f"商品默认回复变量替换失败: {self._safe_str(format_error)}")
+                            formatted_reply = reply_content
 
-            # 2. 获取当前账号的默认回复设置
+                    # 如果开启了"只回复一次"功能，记录这次回复（商品级别）
+                    if True and chat_id:
+                        db_manager.add_default_reply_record(self.cookie_id, chat_id, item_id)
+                        logger.info(f"【{self.cookie_id}】记录商品默认回复: item_id={item_id}, chat_id={chat_id}")
+
+                    logger.info(f"【{self.cookie_id}】使用商品默认回复: 商品ID={item_id}, 文字={formatted_reply}")
+                    return {'text': formatted_reply}
+
+            # 2. 获取账号级别的默认回复设置
             default_reply_settings = db_manager.get_default_reply(self.cookie_id)
 
             if not default_reply_settings or not default_reply_settings.get('enabled', False):
                 logger.warning(f"账号 {self.cookie_id} 未启用默认回复")
                 return None
 
-            # 检查"只回复一次"功能
+            # 检查"只回复一次"功能（账号级别）
             if default_reply_settings.get('reply_once', False) and chat_id:
-                # 检查是否已经回复过这个chat_id
-                if db_manager.has_default_reply_record(self.cookie_id, chat_id):
-                    logger.info(f"【{self.cookie_id}】chat_id {chat_id} 已使用过默认回复，跳过（只回复一次）")
+                if db_manager.has_default_reply_record(self.cookie_id, chat_id, None):
+                    logger.info(f"【{self.cookie_id}】chat_id {chat_id} 已使用过账号默认回复，跳过（只回复一次）")
                     return None
 
             reply_content = default_reply_settings.get('reply_content', '')
-            if not reply_content or (reply_content and reply_content.strip() == ''):
-                logger.info(f"账号 {self.cookie_id} 默认回复内容为空，不进行回复")
-                return "EMPTY_REPLY"  # 返回特殊标记表示不回复
+            reply_image_url = default_reply_settings.get('reply_image_url', '')
+            
+            # 如果文字和图片都为空，返回空回复标记
+            if (not reply_content or reply_content.strip() == '') and (not reply_image_url or reply_image_url.strip() == ''):
+                logger.info(f"账号 {self.cookie_id} 默认回复内容和图片都为空，不进行回复")
+                return "EMPTY_REPLY"
 
             # 进行变量替换
-            try:
-                # 获取当前商品是否有设置自动回复
-                item_replay = db_manager.get_item_replay(item_id)
+            formatted_reply = ''
+            if reply_content and reply_content.strip():
+                try:
+                    formatted_reply = reply_content.format(
+                        send_user_name=send_user_name,
+                        send_user_id=send_user_id,
+                        send_message=send_message,
+                        item_id=item_id or ''
+                    )
+                except Exception as format_error:
+                    logger.error(f"账号默认回复变量替换失败: {self._safe_str(format_error)}")
+                    formatted_reply = reply_content
 
-                formatted_reply = reply_content.format(
-                    send_user_name=send_user_name,
-                    send_user_id=send_user_id,
-                    send_message=send_message
-                )
+            # 如果开启了"只回复一次"功能，记录这次回复（账号级别）
+            if default_reply_settings.get('reply_once', False) and chat_id:
+                db_manager.add_default_reply_record(self.cookie_id, chat_id, None)
+                logger.info(f"【{self.cookie_id}】记录账号默认回复: chat_id={chat_id}")
 
-                if item_replay:
-                    formatted_reply = item_replay.get('reply_content', '')
-
-                # 如果开启了"只回复一次"功能，记录这次回复
-                if default_reply_settings.get('reply_once', False) and chat_id:
-                    db_manager.add_default_reply_record(self.cookie_id, chat_id)
-                    logger.info(f"【{self.cookie_id}】记录默认回复: chat_id={chat_id}")
-
-                logger.info(f"【{self.cookie_id}】使用默认回复: {formatted_reply}")
-                return formatted_reply
-            except Exception as format_error:
-                logger.error(f"默认回复变量替换失败: {self._safe_str(format_error)}")
-                # 如果变量替换失败，返回原始内容
-                return reply_content
+            logger.info(f"【{self.cookie_id}】使用账号默认回复: 文字={formatted_reply}, 图片={reply_image_url}")
+            return {'text': formatted_reply, 'image_url': reply_image_url if reply_image_url and reply_image_url.strip() else None}
 
         except Exception as e:
             logger.error(f"获取默认回复失败: {self._safe_str(e)}")
@@ -3360,6 +3454,45 @@ class XianyuLive:
 
         return False
 
+    async def _get_image_size_from_url(self, image_url: str) -> tuple:
+        """从URL获取图片尺寸
+        
+        Args:
+            image_url: 图片URL
+            
+        Returns:
+            (width, height) 元组，失败返回 (None, None)
+        """
+        import aiohttp
+        from io import BytesIO
+        
+        try:
+            logger.info(f"【{self.cookie_id}】开始从URL获取图片尺寸: {image_url[:80]}...")
+            
+            # 不接受AVIF格式（PIL默认不支持），让CDN返回WEBP/JPEG等格式
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'image/jpeg,image/png,image/gif,image/webp,*/*;q=0.8',
+                'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+                'Referer': 'https://www.goofish.com/',
+            }
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.get(image_url, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as response:
+                    if response.status == 200:
+                        image_data = await response.read()
+                        from PIL import Image
+                        with Image.open(BytesIO(image_data)) as img:
+                            width, height = img.size
+                            logger.info(f"【{self.cookie_id}】解析图片尺寸成功: {width}x{height}")
+                            return (width, height)
+                    else:
+                        logger.warning(f"【{self.cookie_id}】下载图片失败，HTTP状态码: {response.status}")
+        except Exception as e:
+            logger.warning(f"【{self.cookie_id}】从URL获取图片尺寸失败: {e}")
+        
+        return (None, None)
+
     async def _update_keyword_image_url(self, keyword: str, new_image_url: str):
         """更新关键词的图片URL"""
         try:
@@ -3383,6 +3516,18 @@ class XianyuLive:
                 logger.warning(f"卡券图片URL更新失败: 卡券ID={card_id}")
         except Exception as e:
             logger.error(f"更新卡券图片URL失败: {e}")
+
+    async def _update_default_reply_image_url(self, new_image_url: str):
+        """更新默认回复的图片URL为CDN URL"""
+        try:
+            from db_manager import db_manager
+            success = db_manager.update_default_reply_image_url(self.cookie_id, new_image_url)
+            if success:
+                logger.info(f"【{self.cookie_id}】默认回复图片URL已更新: {new_image_url}")
+            else:
+                logger.warning(f"【{self.cookie_id}】默认回复图片URL更新失败")
+        except Exception as e:
+            logger.error(f"【{self.cookie_id}】更新默认回复图片URL失败: {e}")
 
     async def get_ai_reply(self, send_user_name: str, send_user_id: str, send_message: str, item_id: str, chat_id: str):
         """获取AI回复"""
@@ -3531,9 +3676,6 @@ class XianyuLive:
                     logger.info(f"📱 解析后的配置数据: {config_data}")
 
                     match channel_type:
-                        case 'qq':
-                            logger.info(f"📱 开始发送QQ通知...")
-                            await self._send_qq_notification(config_data, notification_msg)
                         case 'ding_talk' | 'dingtalk':
                             logger.info(f"📱 开始发送钉钉通知...")
                             await self._send_dingtalk_notification(config_data, notification_msg)
@@ -3577,54 +3719,6 @@ class XianyuLive:
         except (json.JSONDecodeError, TypeError):
             # 兼容旧格式（直接字符串）
             return {"config": config}
-
-    async def _send_qq_notification(self, config_data: dict, message: str):
-        """发送QQ通知"""
-        try:
-            import aiohttp
-
-            logger.info(f"📱 QQ通知 - 开始处理配置数据: {config_data}")
-
-            # 解析配置（QQ号码）
-            qq_number = config_data.get('qq_number') or config_data.get('config', '')
-            qq_number = qq_number.strip() if qq_number else ''
-
-            logger.info(f"📱 QQ通知 - 解析到QQ号码: {qq_number}")
-
-            if not qq_number:
-                logger.warning("📱 QQ通知 - QQ号码配置为空，无法发送通知")
-                return
-
-            # 构建请求URL
-            api_url = "http://notice.zhinianblog.cn/sendPrivateMsg"
-            params = {
-                'qq': qq_number,
-                'msg': message
-            }
-
-            logger.info(f"📱 QQ通知 - 请求URL: {api_url}")
-            logger.info(f"📱 QQ通知 - 请求参数: qq={qq_number}, msg长度={len(message)}")
-
-            # 发送GET请求
-            async with aiohttp.ClientSession() as session:
-                async with session.get(api_url, params=params, timeout=10) as response:
-                    response_text = await response.text()
-                    logger.info(f"📱 QQ通知 - 响应状态: {response.status}")
-
-                    # 需求：502 视为成功，且不打印返回内容
-                    if response.status == 502:
-                        logger.info(f"📱 QQ通知发送成功: {qq_number} (状态码: {response.status})")
-                    elif response.status == 200:
-                        logger.info(f"📱 QQ通知发送成功: {qq_number} (状态码: {response.status})")
-                        logger.warning(f"📱 QQ通知 - 响应内容: {response_text}")
-                    else:
-                        logger.warning(f"📱 QQ通知发送失败: HTTP {response.status}")
-                        logger.warning(f"📱 QQ通知 - 响应内容: {response_text}")
-
-        except Exception as e:
-            logger.error(f"📱 发送QQ通知异常: {self._safe_str(e)}")
-            import traceback
-            logger.error(f"📱 QQ通知异常详情: {traceback.format_exc()}")
 
     async def _send_dingtalk_notification(self, config_data: dict, message: str):
         """发送钉钉通知"""
@@ -4160,9 +4254,6 @@ class XianyuLive:
                     config_data = self._parse_notification_config(channel_config)
 
                     match channel_type:
-                        case 'qq':
-                            await self._send_qq_notification(config_data, notification_msg)
-                            notification_sent = True
                         case 'ding_talk' | 'dingtalk':
                             await self._send_dingtalk_notification(config_data, notification_msg)
                             notification_sent = True
@@ -4314,9 +4405,6 @@ class XianyuLive:
                         config_data = self._parse_notification_config(channel_config)
 
                         match channel_type:
-                            case 'qq':
-                                await self._send_qq_notification(config_data, notification_message)
-                                logger.info(f"已发送自动发货通知到QQ")
                             case 'ding_talk' | 'dingtalk':
                                 await self._send_dingtalk_notification(config_data, notification_message)
                                 logger.info(f"已发送自动发货通知到钉钉")
@@ -4398,6 +4486,7 @@ class XianyuLive:
             secure_freeshipping.current_token = self.current_token
             secure_freeshipping.last_token_refresh_time = self.last_token_refresh_time
             secure_freeshipping.token_refresh_interval = self.token_refresh_interval
+            secure_freeshipping.main_instance = self  # 传递主实例引用，用于触发密码登录
 
             # 调用免拼发货方法
             return await secure_freeshipping.auto_freeshipping(order_id, item_id, buyer_id, retry_count)
@@ -4600,41 +4689,60 @@ class XianyuLive:
                         if spec_name and spec_value:
                             logger.info(f"获取到规格信息: {spec_name} = {spec_value}")
                         else:
-                            logger.warning(f"未能获取到规格信息，将使用兜底匹配")
+                            logger.warning(f"未能获取到规格信息，将跳过自动发货")
+                            return None
                     else:
-                        logger.warning(f"获取订单详情失败（返回类型: {type(order_detail).__name__}），将使用兜底匹配")
+                        logger.warning(f"获取订单详情失败（返回类型: {type(order_detail).__name__}），将跳过自动发货")
+                        return None
                 except Exception as e:
-                    logger.error(f"获取订单规格信息失败: {self._safe_str(e)}，将使用兜底匹配")
+                    logger.error(f"获取订单规格信息失败: {self._safe_str(e)}，将跳过自动发货")
+                    return None
 
-            # 智能匹配发货规则：优先精确匹配，然后兜底匹配
+            # 智能匹配发货规则：多规格商品只匹配多规格卡券，非多规格商品只匹配非多规格卡券
             delivery_rules = []
 
-            # 第一步：如果有规格信息，尝试精确匹配多规格发货规则
-            if spec_name and spec_value:
-                logger.info(f"尝试精确匹配多规格发货规则: {search_text[:50]}... [{spec_name}:{spec_value}]")
-                delivery_rules = db_manager.get_delivery_rules_by_keyword_and_spec(search_text, spec_name, spec_value)
-
-                if delivery_rules:
-                    logger.info(f"✅ 找到精确匹配的多规格发货规则: {len(delivery_rules)}个")
+            if is_multi_spec:
+                # 多规格商品：只匹配多规格发货规则
+                if spec_name and spec_value:
+                    logger.info(f"多规格商品，尝试匹配多规格发货规则: {search_text[:50]}... [{spec_name}:{spec_value}]")
+                    delivery_rules = db_manager.get_delivery_rules_by_keyword_and_spec(search_text, spec_name, spec_value)
+                    # 过滤只保留多规格卡券
+                    delivery_rules = [r for r in delivery_rules if r.get('is_multi_spec')]
+                    
+                    if delivery_rules:
+                        logger.info(f"✅ 找到匹配的多规格发货规则: {len(delivery_rules)}个")
+                    else:
+                        logger.warning(f"❌ 多规格商品未找到匹配的多规格发货规则，跳过自动发货")
+                        return None
                 else:
-                    logger.info(f"❌ 未找到精确匹配的多规格发货规则")
-
-            # 第二步：如果精确匹配失败，尝试兜底匹配（普通发货规则）
-            if not delivery_rules:
-                logger.info(f"尝试兜底匹配普通发货规则: {search_text[:50]}...")
+                    logger.warning(f"❌ 多规格商品但无规格信息，跳过自动发货")
+                    return None
+            else:
+                # 非多规格商品：只匹配非多规格发货规则
+                logger.info(f"非多规格商品，尝试匹配普通发货规则: {search_text[:50]}...")
                 delivery_rules = db_manager.get_delivery_rules_by_keyword(search_text)
-
+                # 过滤只保留非多规格卡券
+                delivery_rules = [r for r in delivery_rules if not r.get('is_multi_spec')]
+                
                 if delivery_rules:
-                    logger.info(f"✅ 找到兜底匹配的普通发货规则: {len(delivery_rules)}个")
+                    logger.info(f"✅ 找到匹配的普通发货规则: {len(delivery_rules)}个")
                 else:
-                    logger.info(f"❌ 未找到任何匹配的发货规则")
+                    logger.warning(f"❌ 非多规格商品未找到匹配的普通发货规则，跳过自动发货")
+                    return None
+
+            # 检查匹配到的卡券数量，只有唯一匹配时才自动发货
+            if len(delivery_rules) > 1:
+                rule_names = [f"{r['card_name']}({r.get('spec_name', '')}:{r.get('spec_value', '')})" if r.get('is_multi_spec') else r['card_name'] for r in delivery_rules]
+                logger.warning(f"❌ 匹配到多个发货规则({len(delivery_rules)}个)，无法确定使用哪个，跳过自动发货: {', '.join(rule_names)}")
+                return None
 
             if not delivery_rules:
                 logger.warning(f"未找到匹配的发货规则: {search_text[:50]}...")
                 return None
 
-            # 使用第一个匹配的规则（按关键字长度降序排列，优先匹配更精确的规则）
+            # 使用唯一匹配的规则
             rule = delivery_rules[0]
+            logger.info(f"✅ 唯一匹配发货规则: {rule['keyword']} -> {rule['card_name']} ({rule['card_type']})")
 
             # 保存商品信息到数据库（需要有商品标题才保存）
             # 尝试获取商品标题
@@ -4792,6 +4900,10 @@ class XianyuLive:
     def _process_delivery_content_with_description(self, delivery_content: str, card_description: str) -> str:
         """处理发货内容和备注信息，实现变量替换"""
         try:
+            # 如果是图片发送标记，不进行备注处理，直接返回
+            if delivery_content.startswith("__IMAGE_SEND__"):
+                return delivery_content
+            
             # 如果没有备注信息，直接返回发货内容
             if not card_description or not card_description.strip():
                 return delivery_content
@@ -6014,6 +6126,10 @@ class XianyuLive:
         Returns:
             bool: 成功返回True，失败返回False
         """
+        # 已禁用浏览器刷新Cookie功能，直接返回成功
+        logger.info(f"【{self.cookie_id}】浏览器页面Cookie刷新已禁用，跳过")
+        return True
+
         playwright = None
         browser = None
 
@@ -6307,6 +6423,10 @@ class XianyuLive:
             triggered_by_refresh_token: 是否由refresh_token方法触发，如果是True则设置browser_cookie_refreshed标志
         """
 
+
+        # 已禁用浏览器刷新Cookie功能，直接返回成功
+        logger.info(f"【{self.cookie_id}】浏览器Cookie刷新已禁用，跳过")
+        return True
 
         playwright = None
         browser = None
@@ -7205,12 +7325,87 @@ class XianyuLive:
                         reply_source = 'AI'  # 标记为AI回复
                     else:
                         # 3. 最后使用默认回复
-                        reply = await self.get_default_reply(send_user_name, send_user_id, send_message, chat_id, item_id)
-                        if reply == "EMPTY_REPLY":
+                        default_reply_result = await self.get_default_reply(send_user_name, send_user_id, send_message, chat_id, item_id)
+                        if default_reply_result == "EMPTY_REPLY":
                             # 默认回复内容为空，不进行任何回复
                             logger.info(f"[{msg_time}] 【{self.cookie_id}】默认回复内容为空，跳过自动回复")
                             return
-                        reply_source = '默认'  # 标记为默认回复
+                        
+                        # 处理默认回复（可能包含图片和文字）
+                        if default_reply_result and isinstance(default_reply_result, dict):
+                            reply_source = '默认'  # 标记为默认回复
+                            default_image_url = default_reply_result.get('image_url')
+                            default_text = default_reply_result.get('text')
+                            
+                            # 如果存在图片，先发送图片
+                            if default_image_url:
+                                try:
+                                    # 处理图片URL（上传到CDN如果需要）
+                                    final_image_url = default_image_url
+                                    image_width, image_height = 800, 600  # 默认尺寸
+                                    
+                                    if self._is_cdn_url(default_image_url):
+                                        # 已经是CDN链接，获取真实尺寸
+                                        logger.info(f"【{self.cookie_id}】默认回复使用CDN图片: {default_image_url}")
+                                        width, height = await self._get_image_size_from_url(default_image_url)
+                                        if width and height:
+                                            image_width, image_height = width, height
+                                    elif default_image_url.startswith('/static/uploads/') or default_image_url.startswith('static/uploads/'):
+                                        # 本地图片，需要上传到闲鱼CDN
+                                        local_image_path = default_image_url.replace('/static/uploads/', 'static/uploads/')
+                                        if os.path.exists(local_image_path):
+                                            logger.info(f"【{self.cookie_id}】准备上传默认回复本地图片到闲鱼CDN: {local_image_path}")
+                                            
+                                            from utils.image_uploader import ImageUploader
+                                            uploader = ImageUploader(self.cookies_str)
+                                            
+                                            async with uploader:
+                                                cdn_url = await uploader.upload_image(local_image_path)
+                                                if cdn_url:
+                                                    logger.info(f"【{self.cookie_id}】默认回复图片上传成功，CDN URL: {cdn_url}")
+                                                    final_image_url = cdn_url
+                                                    
+                                                    # 更新数据库中的图片URL为CDN URL
+                                                    await self._update_default_reply_image_url(cdn_url)
+                                                    
+                                                    # 获取实际图片尺寸
+                                                    from utils.image_utils import image_manager
+                                                    try:
+                                                        actual_width, actual_height = image_manager.get_image_size(local_image_path)
+                                                        if actual_width and actual_height:
+                                                            image_width, image_height = actual_width, actual_height
+                                                    except Exception as e:
+                                                        logger.warning(f"【{self.cookie_id}】获取图片尺寸失败，使用默认尺寸: {e}")
+                                                else:
+                                                    logger.error(f"【{self.cookie_id}】默认回复图片上传失败: {local_image_path}")
+                                                    final_image_url = None
+                                        else:
+                                            logger.error(f"【{self.cookie_id}】默认回复本地图片文件不存在: {local_image_path}")
+                                            final_image_url = None
+                                    else:
+                                        # 其他类型的URL，获取真实尺寸
+                                        width, height = await self._get_image_size_from_url(default_image_url)
+                                        if width and height:
+                                            image_width, image_height = width, height
+                                    
+                                    # 发送图片
+                                    if final_image_url:
+                                        await self.send_image_msg(websocket, chat_id, send_user_id, final_image_url, image_width, image_height)
+                                        msg_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
+                                        logger.info(f"[{msg_time}] 【{reply_source}图片发出】用户: {send_user_name} (ID: {send_user_id}), 商品({item_id}): 图片 {final_image_url}")
+                                except Exception as e:
+                                    logger.error(f"【{self.cookie_id}】默认回复图片发送失败: {self._safe_str(e)}")
+                            
+                            # 然后发送文字（如果有）
+                            if default_text and default_text.strip():
+                                reply = default_text
+                            else:
+                                # 只有图片没有文字，已经发送完毕
+                                if default_image_url:
+                                    return
+                                reply = None
+                        else:
+                            reply = None
 
             # 注意：这里只有商品ID，没有标题和详情，根据新的规则不保存到数据库
             # 商品信息会在其他有完整信息的地方保存（如发货规则匹配时）
@@ -7277,6 +7472,8 @@ class XianyuLive:
 
             # 如果不是同步包消息，直接返回
             if not self.is_sync_package(message_data):
+                # 添加调试日志，记录非同步包消息
+                logger.debug(f"【{self.cookie_id}】非同步包消息，跳过处理")
                 return
 
             # 获取并解密数据
@@ -7365,7 +7562,13 @@ class XianyuLive:
                         # 提取用户ID
                         try:
                             message_1 = message.get("1")
-                            if isinstance(message_1, str) and '@' in message_1:
+                            message_4 = message.get("4")
+                            
+                            # 优先从message['4']提取（新格式）
+                            if isinstance(message_4, dict) and "senderUserId" in message_4:
+                                temp_user_id = message_4.get("senderUserId", "unknown_user")
+                            # 从message['1']提取（旧格式）
+                            elif isinstance(message_1, str) and '@' in message_1:
                                 temp_user_id = message_1.split('@')[0]
                             elif isinstance(message_1, dict):
                                 # 从字典中提取用户ID
@@ -7380,7 +7583,16 @@ class XianyuLive:
 
                         # 提取商品ID
                         try:
-                            if "1" in message and isinstance(message["1"], dict) and "10" in message["1"] and isinstance(message["1"]["10"], dict):
+                            message_4 = message.get("4")
+                            
+                            # 优先从message['4']['reminderUrl']提取（新格式）
+                            if isinstance(message_4, dict) and "reminderUrl" in message_4:
+                                url_info = message_4.get("reminderUrl", "")
+                                if isinstance(url_info, str) and "itemId=" in url_info:
+                                    temp_item_id = url_info.split("itemId=")[1].split("&")[0]
+                            
+                            # 从message['1']['10']提取（旧格式）
+                            if not temp_item_id and "1" in message and isinstance(message["1"], dict) and "10" in message["1"] and isinstance(message["1"]["10"], dict):
                                 url_info = message["1"]["10"].get("reminderUrl", "")
                                 if isinstance(url_info, str) and "itemId=" in url_info:
                                     temp_item_id = url_info.split("itemId=")[1].split("&")[0]
@@ -7408,7 +7620,13 @@ class XianyuLive:
             user_id = None
             try:
                 message_1 = message.get("1")
-                if isinstance(message_1, str) and '@' in message_1:
+                message_4 = message.get("4")
+                
+                # 优先从message['4']提取（新格式）
+                if isinstance(message_4, dict) and "senderUserId" in message_4:
+                    user_id = message_4.get("senderUserId", "unknown_user")
+                # 从message['1']提取（旧格式）
+                elif isinstance(message_1, str) and '@' in message_1:
                     user_id = message_1.split('@')[0]
                 elif isinstance(message_1, dict):
                     # 如果message['1']是字典，从message["1"]["10"]["senderUserId"]中提取user_id
@@ -7427,7 +7645,16 @@ class XianyuLive:
             # 安全地提取商品ID
             item_id = None
             try:
-                if "1" in message and isinstance(message["1"], dict) and "10" in message["1"] and isinstance(message["1"]["10"], dict):
+                message_4 = message.get("4")
+                
+                # 优先从message['4']['reminderUrl']提取（新格式）
+                if isinstance(message_4, dict) and "reminderUrl" in message_4:
+                    url_info = message_4.get("reminderUrl", "")
+                    if isinstance(url_info, str) and "itemId=" in url_info:
+                        item_id = url_info.split("itemId=")[1].split("&")[0]
+                
+                # 从message['1']['10']提取（旧格式）
+                if not item_id and "1" in message and isinstance(message["1"], dict) and "10" in message["1"] and isinstance(message["1"]["10"], dict):
                     url_info = message["1"]["10"].get("reminderUrl", "")
                     if isinstance(url_info, str) and "itemId=" in url_info:
                         item_id = url_info.split("itemId=")[1].split("&")[0]
@@ -7448,11 +7675,56 @@ class XianyuLive:
                 logger.info(message)
                 msg_time = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
 
-                # 安全地检查订单状态
+                # 安全地检查订单状态 - 支持message['3']和message['4']两种结构
                 red_reminder = None
+                reminder_content = None
+                message_4 = None
+                
+                # 检查message['3']结构（旧格式）
                 if isinstance(message, dict) and "3" in message and isinstance(message["3"], dict):
                     red_reminder = message["3"].get("redReminder")
+                
+                # 检查message['4']结构（新格式）
+                if isinstance(message, dict) and "4" in message and isinstance(message["4"], dict):
+                    message_4 = message["4"]
+                    if not red_reminder:
+                        red_reminder = message_4.get("redReminder")
+                    reminder_content = message_4.get("reminderContent")
 
+                # 【优先处理】检查message['4']中的reminderContent是否触发自动发货
+                # 必须在redReminder检查之前，因为两个字段可能有冲突
+                if message_4 and reminder_content and self._is_auto_delivery_trigger(reminder_content):
+                    logger.info(f'[{msg_time}] 【{self.cookie_id}】检测到message[4]自动发货触发消息: {reminder_content}')
+                    
+                    # 使用前面已经提取好的user_id和item_id
+                    send_user_id = user_id if user_id else message_4.get("senderUserId", "unknown")
+                    send_user_name = message_4.get("reminderTitle", "未知用户")
+                    
+                    # 提取chat_id
+                    chat_id = None
+                    if "2" in message:
+                        chat_id_raw = message["2"]
+                        chat_id = chat_id_raw.split('@')[0] if '@' in str(chat_id_raw) else str(chat_id_raw)
+                    
+                    if not chat_id:
+                        chat_id = f"auto_{send_user_id}_{int(time.time())}"
+                    
+                    # 使用已提取的item_id，如果没有则尝试从message_4提取
+                    final_item_id = item_id if item_id and not item_id.startswith("auto_") else None
+                    if not final_item_id and "reminderUrl" in message_4:
+                        url_info = message_4.get("reminderUrl", "")
+                        if isinstance(url_info, str) and "itemId=" in url_info:
+                            final_item_id = url_info.split("itemId=")[1].split("&")[0]
+                    
+                    if not final_item_id:
+                        final_item_id = item_id  # 使用默认值
+                    
+                    # 调用自动发货处理
+                    await self._handle_auto_delivery(websocket, message, send_user_name, send_user_id,
+                                                   final_item_id, chat_id, msg_time)
+                    return
+
+                # 处理其他redReminder状态
                 if red_reminder == '等待买家付款':
                     user_url = f'https://www.goofish.com/personal?userId={user_id}'
                     logger.info(f'[{msg_time}] 【系统】等待买家 {user_url} 付款')
@@ -7465,6 +7737,7 @@ class XianyuLive:
                     user_url = f'https://www.goofish.com/personal?userId={user_id}'
                     logger.info(f'[{msg_time}] 【系统】交易成功 {user_url} 等待卖家发货')
                     # return
+                    
             except:
                 pass
 
@@ -7569,10 +7842,11 @@ class XianyuLive:
                     logger.error(f"订单状态处理失败: {self._safe_str(e)}")
 
             # 【优先处理】检查系统消息和自动发货触发消息（不受人工接入暂停影响）
-            if send_message == '[我已拍下，待付款]':
-                logger.info(f'[{msg_time}] 【{self.cookie_id}】系统消息不处理')
-                return
-            elif send_message == '[你关闭了订单，钱款已原路退返]':
+            # 注释掉 [我已拍下，待付款] 的拦截，让它可以触发自动回复
+            # if send_message == '[我已拍下，待付款]':
+            #     logger.info(f'[{msg_time}] 【{self.cookie_id}】系统消息不处理')
+            #     return
+            if send_message == '[你关闭了订单，钱款已原路退返]':
                 logger.info(f'[{msg_time}] 【{self.cookie_id}】系统消息不处理')
                 return
             elif send_message == '[不想宝贝被砍价?设置不砍价回复  ]':
@@ -7658,6 +7932,20 @@ class XianyuLive:
                         if not order_id:
                             logger.warning(f'[{msg_time}] 【{self.cookie_id}】❌ 未能提取到订单ID，无法执行免拼发货')
                             return
+
+                        # 更新订单的is_bargain字段为True（标记为小刀订单）
+                        try:
+                            from db_manager import db_manager
+                            db_manager.insert_or_update_order(
+                                order_id=order_id,
+                                item_id=item_id,
+                                buyer_id=send_user_id,
+                                cookie_id=self.cookie_id,
+                                is_bargain=True
+                            )
+                            logger.info(f'[{msg_time}] 【{self.cookie_id}】✅ 订单 {order_id} 已标记为小刀订单')
+                        except Exception as e:
+                            logger.error(f'[{msg_time}] 【{self.cookie_id}】标记小刀订单失败: {self._safe_str(e)}')
 
                         # 延迟2秒后执行免拼发货
                         logger.info(f'[{msg_time}] 【{self.cookie_id}】延迟2秒后执行免拼发货...')
@@ -8120,27 +8408,22 @@ class XianyuLive:
             ) as response:
                 res_json = await response.json()
 
-                # 检查并更新Cookie
-                if 'set-cookie' in response.headers:
-                    new_cookies = {}
-                    for cookie in response.headers.getall('set-cookie', []):
-                        if '=' in cookie:
-                            name, value = cookie.split(';')[0].split('=', 1)
-                            new_cookies[name.strip()] = value.strip()
-
-                    # 更新cookies
-                    if new_cookies:
-                        self.cookies.update(new_cookies)
-                        # 生成新的cookie字符串
-                        self.cookies_str = '; '.join([f"{k}={v}" for k, v in self.cookies.items()])
-                        # 更新数据库中的Cookie
-                        await self.update_config_cookies()
-                        logger.warning("已更新Cookie到数据库")
+                # 检查并更新Cookie（使用通用工具函数）
+                from utils.xianyu_utils import extract_cookies_from_response, is_token_expired_error, is_session_expired_error
+                new_cookies = extract_cookies_from_response(response)
+                if new_cookies:
+                    self.cookies.update(new_cookies)
+                    self.cookies_str = '; '.join([f"{k}={v}" for k, v in self.cookies.items()])
+                    await self.update_config_cookies()
+                    logger.info(f"【{self.cookie_id}】商品列表接口已从Set-Cookie合并 {len(new_cookies)} 个Cookie字段并更新到数据库")
 
                 logger.info(f"商品信息获取响应: {res_json}")
 
+                # 检查返回状态
+                ret_value = res_json.get('ret', []) if isinstance(res_json, dict) else []
+
                 # 检查响应是否成功
-                if res_json.get('ret') and res_json['ret'][0] == 'SUCCESS::调用成功':
+                if ret_value and any('SUCCESS::调用成功' in ret for ret in ret_value):
                     items_data = res_json.get('data', {})
                     # 从cardList中提取商品信息
                     card_list = items_data.get('cardList', [])
@@ -8209,15 +8492,22 @@ class XianyuLive:
                         "raw_data": items_data  # 保留原始数据以备调试
                     }
                 else:
-                    # 检查是否是token失效
-                    error_msg = res_json.get('ret', [''])[0] if res_json.get('ret') else ''
-                    if 'FAIL_SYS_TOKEN_EXOIRED' in error_msg or 'token' in error_msg.lower():
-                        logger.warning(f"Token失效，准备重试: {error_msg}")
+                    # 【令牌过期】使用已更新的Cookie重试（不触发密码登录）
+                    if is_token_expired_error(ret_value):
+                        logger.warning(f"【{self.cookie_id}】商品列表接口令牌过期，使用新Cookie重试...")
                         await asyncio.sleep(0.5)
                         return await self.get_item_list_info(page_number, page_size, retry_count + 1)
-                    else:
-                        logger.error(f"获取商品信息失败: {res_json}")
-                        return {"error": f"获取商品信息失败: {error_msg}"}
+                    
+                    # 【Session过期】触发密码登录（不阻塞，不重试当前请求）
+                    if is_session_expired_error(ret_value):
+                        logger.warning(f"【{self.cookie_id}】商品列表接口Session过期，触发密码登录...")
+                        await self._try_password_login_refresh("Session过期(商品列表)")
+                        return {"error": f"Session过期: {ret_value}"}
+                    
+                    # 其他错误
+                    error_msg = ret_value[0] if ret_value else '未知错误'
+                    logger.error(f"获取商品信息失败: {res_json}")
+                    return {"error": f"获取商品信息失败: {error_msg}"}
 
         except Exception as e:
             logger.error(f"商品信息API请求异常: {self._safe_str(e)}")

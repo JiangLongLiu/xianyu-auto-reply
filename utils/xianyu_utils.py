@@ -118,6 +118,104 @@ def generate_sign(t: str, token: str, data: str) -> str:
     return md5_hash.hexdigest()
 
 
+def is_token_expired_error(ret_list: list) -> bool:
+    """判断API返回是否为令牌过期错误
+    
+    令牌过期表示当前Cookie中的_m_h5_tk令牌失效，
+    通常可以通过响应中的Set-Cookie获取新令牌后重试解决。
+    
+    Args:
+        ret_list: API响应中的ret列表
+        
+    Returns:
+        True表示令牌过期
+    """
+    if not ret_list:
+        return False
+    ret_str = str(ret_list)
+    # 注意：闲鱼API实际返回的是EXOIRED（typo），但也要匹配正确拼写EXPIRED
+    return 'FAIL_SYS_TOKEN_EXOIRED' in ret_str or 'FAIL_SYS_TOKEN_EXPIRED' in ret_str or '令牌过期' in ret_str
+
+
+def is_session_expired_error(ret_list: list) -> bool:
+    """判断API返回是否为Session过期错误
+    
+    Session过期表示整个登录会话失效，需要重新进行密码登录。
+    
+    Args:
+        ret_list: API响应中的ret列表
+        
+    Returns:
+        True表示Session过期
+    """
+    if not ret_list:
+        return False
+    ret_str = str(ret_list)
+    return 'FAIL_SYS_SESSION_EXPIRED' in ret_str or 'Session过期' in ret_str
+
+
+def extract_cookies_from_response(response) -> Dict[str, str]:
+    """从HTTP响应头中提取Set-Cookie
+    
+    支持aiohttp和requests的响应对象。
+    
+    Args:
+        response: HTTP响应对象（aiohttp.ClientResponse 或 requests.Response）
+        
+    Returns:
+        提取到的Cookie字典（可能为空）
+    """
+    new_cookies = {}
+    try:
+        # aiohttp响应对象（使用getall方法）
+        if hasattr(response.headers, 'getall'):
+            for cookie_header in response.headers.getall('set-cookie', []):
+                if '=' in cookie_header:
+                    name_value = cookie_header.split(';')[0]
+                    name, value = name_value.split('=', 1)
+                    new_cookies[name.strip()] = value.strip()
+        else:
+            # requests响应对象，通过raw.headers.getlist获取所有Set-Cookie头
+            cookie_headers = []
+            if hasattr(response, 'raw') and hasattr(response.raw, 'headers'):
+                cookie_headers = response.raw.headers.getlist('Set-Cookie') or []
+            
+            # 如果raw方式没获取到，降级为单个header
+            if not cookie_headers:
+                single = response.headers.get('Set-Cookie', '')
+                if single:
+                    cookie_headers = [single]
+            
+            for cookie_header in cookie_headers:
+                if '=' in cookie_header:
+                    name_value = cookie_header.split(';')[0]
+                    name, value = name_value.split('=', 1)
+                    new_cookies[name.strip()] = value.strip()
+    except Exception as e:
+        logger.warning(f"提取Set-Cookie失败: {e}")
+    return new_cookies
+
+
+def merge_cookies(old_cookies_str: str, new_cookies_dict: Dict[str, str]) -> str:
+    """将新Cookie合并到旧Cookie字符串中
+    
+    新Cookie覆盖旧Cookie中的同名字段，保留旧Cookie中的其他字段。
+    
+    Args:
+        old_cookies_str: 旧的Cookie字符串
+        new_cookies_dict: 新提取到的Cookie字典
+        
+    Returns:
+        合并后的Cookie字符串
+    """
+    if not new_cookies_dict:
+        return old_cookies_str
+    
+    old_dict = trans_cookies(old_cookies_str) if old_cookies_str else {}
+    old_dict.update(new_cookies_dict)
+    return '; '.join([f"{k}={v}" for k, v in old_dict.items()])
+
+
 class MessagePackDecoder:
     """MessagePack解码器的纯Python实现"""
     

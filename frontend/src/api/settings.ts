@@ -88,15 +88,21 @@ export const updateEmailSettings = (data: Record<string, unknown>): Promise<ApiR
   return Promise.all(promises).then(() => ({ success: true, message: '设置已保存' }))
 }
 
-// TODO: 测试邮件发送功能需要后端支持 type: 'test' 参数
-// 当前后端的 /send-verification-code 接口只支持 'register' 和 'login' 类型
-export const testEmailSend = async (_email: string): Promise<ApiResponse> => {
-  return { success: false, message: '邮件测试功能暂未实现，请检查 SMTP 配置后直接保存' }
+// 测试邮件发送功能
+export const testEmailSend = async (email: string): Promise<ApiResponse> => {
+  try {
+    const result = await post<ApiResponse>(`/system-settings/test-email?email=${encodeURIComponent(email)}`)
+    return result
+  } catch (error: unknown) {
+    const axiosError = error as { response?: { data?: { detail?: string; message?: string } } }
+    const detail = axiosError.response?.data?.detail || axiosError.response?.data?.message
+    return { success: false, message: detail || '发送测试邮件失败' }
+  }
 }
 
-// 修改密码（管理员）
+// 修改密码（普通用户）
 export const changePassword = async (data: { current_password: string; new_password: string }): Promise<ApiResponse> => {
-  return post('/change-admin-password', data)
+  return post('/change-password', data)
 }
 
 // 获取备份文件列表（管理员）
@@ -114,7 +120,9 @@ export const downloadDatabaseBackup = (): string => {
 export const uploadDatabaseBackup = async (file: File): Promise<ApiResponse> => {
   const formData = new FormData()
   formData.append('backup_file', file)
-  return post('/admin/backup/upload', formData)
+  return post('/admin/backup/upload', formData, {
+    headers: { 'Content-Type': 'multipart/form-data' }
+  })
 }
 
 // 刷新系统缓存
@@ -132,7 +140,9 @@ export const exportUserBackup = (): string => {
 export const importUserBackup = async (file: File): Promise<ApiResponse> => {
   const formData = new FormData()
   formData.append('file', file)
-  return post('/backup/import', formData)
+  return post('/backup/import', formData, {
+    headers: { 'Content-Type': 'multipart/form-data' }
+  })
 }
 
 // ========== 用户设置 ==========
@@ -164,4 +174,16 @@ export const getUserSetting = async (key: string): Promise<{ success: boolean; v
 // 更新用户设置
 export const updateUserSetting = async (key: string, value: string, description?: string): Promise<ApiResponse> => {
   return put(`/user-settings/${key}`, { value, description })
+}
+
+// 检查是否使用默认密码
+export const checkDefaultPassword = async (): Promise<{ using_default: boolean }> => {
+  try {
+    const result = await get<{ using_default: boolean }>('/api/check-default-password')
+    console.log('checkDefaultPassword result:', result)
+    return result
+  } catch (error) {
+    console.error('checkDefaultPassword error:', error)
+    return { using_default: false }
+  }
 }

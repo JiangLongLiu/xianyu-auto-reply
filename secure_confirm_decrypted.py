@@ -138,34 +138,42 @@ class SecureConfirm:
             ) as response:
                 res_json = await response.json()
 
-                # 检查并更新Cookie
-                if 'set-cookie' in response.headers:
-                    new_cookies = {}
-                    for cookie in response.headers.getall('set-cookie', []):
-                        if '=' in cookie:
-                            name, value = cookie.split(';')[0].split('=', 1)
-                            new_cookies[name.strip()] = value.strip()
-
-                    # 更新cookies
-                    if new_cookies:
-                        self.cookies.update(new_cookies)
-                        # 生成新的cookie字符串
-                        self.cookies_str = '; '.join([f"{k}={v}" for k, v in self.cookies.items()])
-                        # 更新数据库中的Cookie
-                        await self._update_config_cookies()
-                        logger.debug("已更新Cookie到数据库")
+                # 检查并更新Cookie（使用通用工具函数）
+                from utils.xianyu_utils import extract_cookies_from_response, is_token_expired_error, is_session_expired_error
+                new_cookies = extract_cookies_from_response(response)
+                if new_cookies:
+                    self.cookies.update(new_cookies)
+                    self.cookies_str = '; '.join([f"{k}={v}" for k, v in self.cookies.items()])
+                    await self._update_config_cookies()
+                    logger.info(f"【{self.cookie_id}】确认发货接口已从Set-Cookie合并 {len(new_cookies)} 个Cookie字段并更新到数据库")
 
                 logger.info(f"【{self.cookie_id}】自动确认发货响应: {res_json}")
 
                 # 检查响应结果
-                if res_json.get('ret') and res_json['ret'][0] == 'SUCCESS::调用成功':
+                ret_value = res_json.get('ret', []) if isinstance(res_json, dict) else []
+                
+                if ret_value and ret_value[0] == 'SUCCESS::调用成功':
                     logger.info(f"【{self.cookie_id}】✅ 自动确认发货成功，订单ID: {order_id}")
                     return {"success": True, "order_id": order_id}
-                else:
-                    error_msg = res_json.get('ret', ['未知错误'])[0] if res_json.get('ret') else '未知错误'
-                    logger.warning(f"【{self.cookie_id}】❌ 自动确认发货失败: {error_msg}")
-
+                
+                # 【令牌过期】使用已更新的Cookie重试（不触发密码登录）
+                if is_token_expired_error(ret_value):
+                    logger.warning(f"【{self.cookie_id}】确认发货接口令牌过期，使用新Cookie重试...")
+                    await asyncio.sleep(0.5)
                     return await self.auto_confirm(order_id, item_id, retry_count + 1)
+                
+                # 【Session过期】触发密码登录（不阻塞，不重试当前请求）
+                if is_session_expired_error(ret_value):
+                    logger.warning(f"【{self.cookie_id}】确认发货接口Session过期，触发密码登录...")
+                    if self.main_instance and hasattr(self.main_instance, '_try_password_login_refresh'):
+                        await self.main_instance._try_password_login_refresh("Session过期(确认发货)")
+                    return {"error": f"Session过期: {ret_value}", "order_id": order_id}
+                
+                # 其他错误，普通重试
+                error_msg = ret_value[0] if ret_value else '未知错误'
+                logger.warning(f"【{self.cookie_id}】❌ 自动确认发货失败: {error_msg}")
+                await asyncio.sleep(0.5)
+                return await self.auto_confirm(order_id, item_id, retry_count + 1)
 
 
         except Exception as e:

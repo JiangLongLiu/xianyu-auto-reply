@@ -1874,28 +1874,44 @@ class XianyuApis:
             if isinstance(res_json, dict):
                 ret_value = res_json.get('ret', [])
                 # 检查ret是否包含成功信息
-                if not any('SUCCESS::调用成功' in ret for ret in ret_value):
-                    logger.warning(f"Token API调用失败，错误信息: {ret_value}")
-                    # 处理响应中的Set-Cookie
-                    if ret_value[0] == 'FAIL_SYS_USER_VALIDATE':
-                        url = res_json["data"]["url"]
-                        drission = DrissionHandler(
-                            is_headless=False,
-                            maximize_window=True,  # 启用窗口最大化
-                            show_mouse_trace=True  # 启用鼠标轨迹
-                        )
-                        cookies = drission.get_cookies(url)
-                        if cookies:
-                            new_x5sec = trans_cookies(cookies)
-                            self.session.cookies.set("x5sec",new_x5sec["x5sec"])
-                    if 'Set-Cookie' in response.headers:
-                        # logger.debug("检测到Set-Cookie，更新cookie")  # 降级为DEBUG并简化
-                        self.clear_duplicate_cookies()
-                    time.sleep(0.5)
-                    return self.get_token(device_id, retry_count + 1)
-                else:
+                if any('SUCCESS::调用成功' in ret for ret in ret_value):
                     logger.info("Token获取成功")
                     return res_json
+                
+                logger.warning(f"Token API调用失败，错误信息: {ret_value}")
+                
+                # 处理滑块验证
+                if ret_value and ret_value[0] == 'FAIL_SYS_USER_VALIDATE':
+                    url = res_json["data"]["url"]
+                    drission = DrissionHandler(
+                        is_headless=False,
+                        maximize_window=True,  # 启用窗口最大化
+                        show_mouse_trace=True  # 启用鼠标轨迹
+                    )
+                    cookies = drission.get_cookies(url)
+                    if cookies:
+                        new_x5sec = trans_cookies(cookies)
+                        self.session.cookies.set("x5sec",new_x5sec["x5sec"])
+                
+                # 处理响应中的Set-Cookie（令牌过期时通常会返回新Cookie）
+                if 'Set-Cookie' in response.headers:
+                    self.clear_duplicate_cookies()
+                
+                # 【令牌过期】使用更新后的Cookie重试（不触发密码登录）
+                from utils.xianyu_utils import is_token_expired_error, is_session_expired_error
+                if is_token_expired_error(ret_value):
+                    logger.warning(f"令牌过期，使用更新后的Cookie重试...")
+                    time.sleep(0.5)
+                    return self.get_token(device_id, retry_count + 1)
+                
+                # 【Session过期】记录日志，返回失败（同步上下文不触发密码登录）
+                if is_session_expired_error(ret_value):
+                    logger.error(f"Session过期，Cookie已失效，需要重新登录")
+                    return False
+                
+                # 其他错误，普通重试
+                time.sleep(0.5)
+                return self.get_token(device_id, retry_count + 1)
             else:
                 logger.error(f"Token API返回格式异常: {res_json}")
                 return self.get_token(device_id, retry_count + 1)
@@ -1948,18 +1964,33 @@ class XianyuApis:
             # 检查返回状态
             if isinstance(res_json, dict):
                 ret_value = res_json.get('ret', [])
-                # 检查ret是否包含成功信息
-                if not any('SUCCESS::调用成功' in ret for ret in ret_value):
-                    logger.warning(f"商品信息API调用失败，错误信息: {ret_value}")
-                    # 处理响应中的Set-Cookie
-                    if 'Set-Cookie' in response.headers:
-                        logger.debug("检测到Set-Cookie，更新cookie")
-                        self.clear_duplicate_cookies()
+                
+                # 成功
+                if any('SUCCESS::调用成功' in ret for ret in ret_value):
+                    logger.info(f"商品信息获取成功: {item_id}")
+                    return res_json
+                
+                logger.warning(f"商品信息API调用失败，错误信息: {ret_value}")
+                
+                # 处理响应中的Set-Cookie
+                if 'Set-Cookie' in response.headers:
+                    self.clear_duplicate_cookies()
+                
+                # 【令牌过期】使用更新后的Cookie重试（不触发密码登录）
+                from utils.xianyu_utils import is_token_expired_error, is_session_expired_error
+                if is_token_expired_error(ret_value):
+                    logger.warning(f"商品详情接口令牌过期，使用更新后的Cookie重试...")
                     time.sleep(0.5)
                     return self.get_item_info(item_id, retry_count + 1)
-                else:
-                    logger.debug(f"商品信息获取成功: {item_id}")
-                    return res_json
+                
+                # 【Session过期】记录日志，返回错误（同步上下文不触发密码登录）
+                if is_session_expired_error(ret_value):
+                    logger.error(f"Session过期，Cookie已失效")
+                    return {"error": f"Session过期: {ret_value}"}
+                
+                # 其他错误，普通重试
+                time.sleep(0.5)
+                return self.get_item_info(item_id, retry_count + 1)
             else:
                 logger.error(f"商品信息API返回格式异常: {res_json}")
                 return self.get_item_info(item_id, retry_count + 1)
